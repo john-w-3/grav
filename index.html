@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Gravity Thrust</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { background: #000; overflow: hidden; width: 100%; height: 100%; position: fixed; top: 0; left: 0; }
+  canvas { display: block; position: fixed; top: 0; left: 0; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+function resize() {
+  canvas.width = document.documentElement.clientWidth;
+  canvas.height = document.documentElement.clientHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', () => setTimeout(resize, 100));
+
+// --- Constants ---
+const G = 0.00002;
+const THRUST_POWER = 15;
+const DEST_RADIUS = 18;
+const ROCKET_SIZE = 10;
+const TRAIL_LENGTH = 60;
+const STAR_COUNT = 200;
+
+// --- State ---
+let rocket, destination, spheres, stars, trail, state, message, messageTimer, level;
+let thrusting = false;
+let touchStartX = 0;
+let steering = 0; // -1 to 1
+let fuel = 100;
+const MAX_FUEL = 100;
+
+function rand(min, max) { return Math.random() * (max - min) + min; }
+
+function generateStars() {
+  stars = [];
+  for (let i = 0; i < STAR_COUNT; i++) {
+    stars.push({
+      x: Math.random() * canvas.width,
+      y: Math.random() * canvas.height,
+      r: Math.random() * 1.5 + 0.3,
+      brightness: Math.random() * 0.5 + 0.5,
+      twinkleSpeed: Math.random() * 2 + 1
+    });
+  }
+}
+
+function safePosition(margin, existingSpheres) {
+  for (let attempts = 0; attempts < 200; attempts++) {
+    const x = rand(margin, canvas.width - margin);
+    const y = rand(margin, canvas.height - margin);
+    let safe = true;
+    for (const s of existingSpheres) {
+      const dx = x - s.x, dy = y - s.y;
+      if (Math.sqrt(dx * dx + dy * dy) < s.radius + margin) {
+        safe = false;
+        break;
+      }
+    }
+    if (safe) return { x, y };
+  }
+  return { x: rand(margin, canvas.width - margin), y: rand(margin, canvas.height - margin) };
+}
+
+function initLevel(lvl) {
+  level = lvl;
+  const numSpheres = Math.min(3 + level, 12);
+
+  spheres = [];
+  for (let i = 0; i < numSpheres; i++) {
+    const radius = rand(20, 55);
+    const pos = safePosition(radius + 30, spheres);
+    spheres.push({
+      x: pos.x,
+      y: pos.y,
+      radius: radius,
+      mass: (4 / 3) * Math.PI * radius * radius * radius,
+      color: `hsl(${rand(15, 45)}, ${rand(40, 70)}%, ${rand(25, 45)}%)`
+    });
+  }
+
+  // Place rocket as far from spheres as possible
+  const rocketPos = (() => {
+    let best = null, bestScore = -Infinity;
+    for (let i = 0; i < 300; i++) {
+      const x = rand(60, canvas.width - 60);
+      const y = rand(60, canvas.height - 60);
+      let minDist = Infinity;
+      for (const s of spheres) {
+        const dx = x - s.x, dy = y - s.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) - s.radius;
+        if (dist < minDist) minDist = dist;
+      }
+      if (minDist > bestScore) { bestScore = minDist; best = { x, y }; }
+    }
+    return best;
+  })();
+  rocket = {
+    x: rocketPos.x,
+    y: rocketPos.y,
+    vx: 0,
+    vy: 0,
+    angle: 0, // set after destination is placed
+    alive: true
+  };
+
+  // Place destination on opposite side of screen from rocket, away from spheres
+  const destPos = (() => {
+    const maxDist = Math.sqrt(canvas.width ** 2 + canvas.height ** 2);
+    let best = null, bestScore = -Infinity;
+    for (let i = 0; i < 300; i++) {
+      const x = rand(60, canvas.width - 60);
+      const y = rand(60, canvas.height - 60);
+      let minSphereDist = Infinity;
+      for (const s of spheres) {
+        const dx = x - s.x, dy = y - s.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) - s.radius;
+        if (dist < minSphereDist) minSphereDist = dist;
+      }
+      if (minSphereDist < 40) continue; // too close to a sphere
+      const dRocket = Math.sqrt((x - rocket.x) ** 2 + (y - rocket.y) ** 2);
+      // Heavily favor distance from rocket, with a bonus for sphere clearance
+      const score = dRocket * 3 + minSphereDist;
+      if (score > bestScore) { bestScore = score; best = { x, y }; }
+    }
+    return best;
+  })();
+  destination = { x: destPos.x, y: destPos.y };
+
+  // Point rocket at destination
+  rocket.angle = Math.atan2(destination.y - rocket.y, destination.x - rocket.x);
+
+  trail = [];
+  fuel = MAX_FUEL;
+  state = 'intro';
+  message = '';
+  messageTimer = 0;
+  introTime = 0;
+  introRadius = Math.max(canvas.width, canvas.height) * 1.2;
+}
+
+function init() {
+  generateStars();
+  initLevel(1);
+}
+
+// --- Input ---
+function startThrust() { thrusting = true; }
+function stopThrust() { thrusting = false; }
+
+window.addEventListener('keydown', (e) => {
+  if (e.repeat) return;
+  if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') {
+    e.preventDefault();
+    if (state === 'ready') { state = 'playing'; startThrust(); }
+    else if (state === 'playing') startThrust();
+    else if (state === 'win' || state === 'dead') {
+      if (state === 'win') initLevel(level + 1);
+      else initLevel(level);
+    }
+  }
+});
+window.addEventListener('keyup', (e) => {
+  if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') stopThrust();
+});
+
+canvas.addEventListener('mousedown', (e) => {
+  if (state === 'playing') startThrust();
+  else if (state === 'win' || state === 'dead') {
+    if (state === 'win') initLevel(level + 1);
+    else initLevel(level);
+  }
+});
+canvas.addEventListener('mouseup', stopThrust);
+canvas.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  touchStartX = e.touches[0].clientX;
+  steering = 0;
+  if (state === 'ready') { state = 'playing'; startThrust(); }
+  else if (state === 'playing') startThrust();
+  else if (state === 'win' || state === 'dead') {
+    if (state === 'win') initLevel(level + 1);
+    else initLevel(level);
+  }
+});
+canvas.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  const dx = e.touches[0].clientX - touchStartX;
+  steering = Math.max(-1, Math.min(1, dx / 80));
+});
+canvas.addEventListener('touchend', (e) => { e.preventDefault(); stopThrust(); steering = 0; });
+
+// --- Update ---
+function update(dt) {
+  if (state === 'intro') {
+    introTime += dt;
+    const duration = 1.2;
+    const t = Math.min(introTime / duration, 1);
+    // Ease out cubic
+    const ease = 1 - Math.pow(1 - t, 3);
+    introRadius = Math.max(canvas.width, canvas.height) * 1.2 * (1 - ease);
+    if (t >= 1) {
+      state = 'ready';
+      introRadius = 0;
+    }
+    return;
+  }
+  if (state !== 'playing') return;
+
+  // Gravity from spheres
+  for (const s of spheres) {
+    const dx = s.x - rocket.x;
+    const dy = s.y - rocket.y;
+    const distSq = dx * dx + dy * dy;
+    const dist = Math.sqrt(distSq);
+
+    if (dist < s.radius) {
+      state = 'dead';
+      message = 'CRASHED';
+      messageTimer = 0;
+      thrusting = false;
+      return;
+    }
+
+    const force = G * s.mass / distSq;
+    rocket.vx += (dx / dist) * force * dt;
+    rocket.vy += (dy / dist) * force * dt;
+  }
+
+  // Thrust
+  if (thrusting && fuel > 0) {
+    rocket.vx += Math.cos(rocket.angle) * THRUST_POWER * dt;
+    rocket.vy += Math.sin(rocket.angle) * THRUST_POWER * dt;
+    // fuel -= 25 * dt;
+    // if (fuel < 0) fuel = 0;
+  }
+
+  // Steering: drag left/right to rotate; angle stays fixed otherwise
+  if (steering !== 0) {
+    rocket.angle += steering * 3.5 * dt;
+  }
+
+  // Move
+  rocket.x += rocket.vx * dt;
+  rocket.y += rocket.vy * dt;
+
+  // Trail
+  trail.push({ x: rocket.x, y: rocket.y, age: 0 });
+  if (trail.length > TRAIL_LENGTH) trail.shift();
+  for (const t of trail) t.age += dt;
+
+  // Die if off screen
+  if (rocket.x < -10 || rocket.x > canvas.width + 10 || rocket.y < -10 || rocket.y > canvas.height + 10) {
+    state = 'dead';
+    message = 'LOST IN SPACE';
+    messageTimer = 0;
+    thrusting = false;
+    return;
+  }
+
+  // Check destination
+  const ddx = destination.x - rocket.x;
+  const ddy = destination.y - rocket.y;
+  if (Math.sqrt(ddx * ddx + ddy * ddy) < DEST_RADIUS + 6) {
+    state = 'win';
+    message = 'LANDED';
+    messageTimer = 0;
+    thrusting = false;
+  }
+}
+
+// --- Draw ---
+function drawStars(time) {
+  for (const s of stars) {
+    const twinkle = 0.5 + 0.5 * Math.sin(time * s.twinkleSpeed + s.x);
+    const alpha = s.brightness * twinkle;
+    ctx.fillStyle = `rgba(255, 255, 255, ${alpha})`;
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawSphere(s) {
+  const grad = ctx.createRadialGradient(
+    s.x - s.radius * 0.3, s.y - s.radius * 0.3, s.radius * 0.1,
+    s.x, s.y, s.radius
+  );
+  grad.addColorStop(0, `hsl(30, 50%, 55%)`);
+  grad.addColorStop(0.7, s.color);
+  grad.addColorStop(1, `hsl(20, 40%, 12%)`);
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(s.x, s.y, s.radius, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Atmosphere glow
+  const glow = ctx.createRadialGradient(s.x, s.y, s.radius, s.x, s.y, s.radius * 1.8);
+  glow.addColorStop(0, `rgba(100, 150, 255, 0.08)`);
+  glow.addColorStop(1, `rgba(100, 150, 255, 0)`);
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  ctx.arc(s.x, s.y, s.radius * 1.8, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawDestination(time) {
+  const pulse = 0.7 + 0.3 * Math.sin(time * 4);
+
+  // Outer ring
+  ctx.strokeStyle = `rgba(0, 255, 150, ${0.3 * pulse})`;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(destination.x, destination.y, DEST_RADIUS + 8 + 4 * Math.sin(time * 2), 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Inner beacon
+  const grad = ctx.createRadialGradient(
+    destination.x, destination.y, 0,
+    destination.x, destination.y, DEST_RADIUS
+  );
+  grad.addColorStop(0, `rgba(0, 255, 150, ${0.9 * pulse})`);
+  grad.addColorStop(0.5, `rgba(0, 255, 100, ${0.4 * pulse})`);
+  grad.addColorStop(1, `rgba(0, 255, 100, 0)`);
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(destination.x, destination.y, DEST_RADIUS, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Diamond marker
+  ctx.save();
+  ctx.translate(destination.x, destination.y);
+  ctx.rotate(time * 1.5);
+  ctx.strokeStyle = `rgba(0, 255, 150, ${pulse})`;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(0, -10);
+  ctx.lineTo(10, 0);
+  ctx.lineTo(0, 10);
+  ctx.lineTo(-10, 0);
+  ctx.closePath();
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawTrail() {
+  for (let i = 1; i < trail.length; i++) {
+    const alpha = (i / trail.length) * 0.6;
+    const width = (i / trail.length) * 2;
+    ctx.strokeStyle = `rgba(100, 180, 255, ${alpha})`;
+    ctx.lineWidth = width;
+    ctx.beginPath();
+    ctx.moveTo(trail[i - 1].x, trail[i - 1].y);
+    ctx.lineTo(trail[i].x, trail[i].y);
+    ctx.stroke();
+  }
+}
+
+function drawRocket(time) {
+  ctx.save();
+  ctx.translate(rocket.x, rocket.y);
+  ctx.rotate(rocket.angle);
+
+  // Flame when thrusting
+  if (thrusting && state === 'playing') {
+    const flicker = rand(0.7, 1.3);
+    const flameLen = 18 * flicker;
+
+    // Glow
+    const glow = ctx.createRadialGradient(-ROCKET_SIZE * 0.4, 0, 0, -ROCKET_SIZE * 0.4, 0, flameLen * 1.2);
+    glow.addColorStop(0, `rgba(255, 150, 30, ${0.3 * flicker})`);
+    glow.addColorStop(1, `rgba(255, 100, 0, 0)`);
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(-ROCKET_SIZE * 0.4, 0, flameLen * 1.2, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Outer flame
+    ctx.fillStyle = `rgba(255, 80, 10, ${0.8 * flicker})`;
+    ctx.beginPath();
+    ctx.moveTo(-ROCKET_SIZE * 0.4, -5);
+    ctx.lineTo(-ROCKET_SIZE * 0.4 - flameLen, 0);
+    ctx.lineTo(-ROCKET_SIZE * 0.4, 5);
+    ctx.fill();
+
+    // Mid flame
+    ctx.fillStyle = `rgba(255, 160, 30, ${0.9 * flicker})`;
+    ctx.beginPath();
+    ctx.moveTo(-ROCKET_SIZE * 0.4, -3.5);
+    ctx.lineTo(-ROCKET_SIZE * 0.4 - flameLen * 0.7, 0);
+    ctx.lineTo(-ROCKET_SIZE * 0.4, 3.5);
+    ctx.fill();
+
+    // Inner flame
+    ctx.fillStyle = `rgba(255, 240, 100, ${0.95 * flicker})`;
+    ctx.beginPath();
+    ctx.moveTo(-ROCKET_SIZE * 0.4, -2);
+    ctx.lineTo(-ROCKET_SIZE * 0.4 - flameLen * 0.4, 0);
+    ctx.lineTo(-ROCKET_SIZE * 0.4, 2);
+    ctx.fill();
+  }
+
+  // Rocket body
+  ctx.fillStyle = '#e0e0e0';
+  ctx.beginPath();
+  ctx.moveTo(ROCKET_SIZE, 0);
+  ctx.lineTo(-ROCKET_SIZE * 0.4, -ROCKET_SIZE * 0.4);
+  ctx.lineTo(-ROCKET_SIZE * 0.4, ROCKET_SIZE * 0.4);
+  ctx.closePath();
+  ctx.fill();
+
+  // Cockpit
+  ctx.fillStyle = '#4af';
+  ctx.beginPath();
+  ctx.arc(ROCKET_SIZE * 0.3, 0, 2.5, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function drawHUD() {
+  // Level
+  ctx.fillStyle = 'rgba(255,255,255,0.4)';
+  ctx.font = '13px monospace';
+  ctx.fillText(`LEVEL ${level}`, 20, 30);
+
+  // Distance to target
+  if (state === 'playing') {
+    const dx = destination.x - rocket.x;
+    const dy = destination.y - rocket.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    ctx.fillStyle = 'rgba(0, 255, 150, 0.5)';
+    ctx.fillText(`${Math.round(dist)}m`, 20, 50);
+  }
+}
+
+function drawMessage(time) {
+  if (state === 'playing') return;
+
+  if (state === 'ready') {
+    const pulse = 0.4 + 0.3 * Math.sin(time * 3);
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.fillStyle = `rgba(255, 255, 255, ${pulse})`;
+    ctx.font = '18px monospace';
+    ctx.fillText('tap to launch', canvas.width / 2, canvas.height / 2 + 80);
+    ctx.restore();
+    return;
+  }
+
+  messageTimer += 1 / 60;
+  const alpha = Math.min(messageTimer * 2, 1);
+
+  ctx.save();
+  ctx.textAlign = 'center';
+
+  // Title
+  ctx.fillStyle = state === 'win'
+    ? `rgba(0, 255, 150, ${alpha})`
+    : `rgba(255, 80, 60, ${alpha})`;
+  ctx.font = 'bold 48px monospace';
+  ctx.fillText(message, canvas.width / 2, canvas.height / 2 - 20);
+
+  // Subtitle
+  ctx.fillStyle = `rgba(255, 255, 255, ${alpha * 0.6})`;
+  ctx.font = '16px monospace';
+  const sub = state === 'win' ? 'tap for next level' : 'tap to retry';
+  ctx.fillText(sub, canvas.width / 2, canvas.height / 2 + 25);
+
+  ctx.restore();
+}
+
+
+// --- Main Loop ---
+let lastTime = 0;
+
+function gameLoop(timestamp) {
+  const dt = Math.min((timestamp - lastTime) / 1000, 0.05);
+  lastTime = timestamp;
+  const time = timestamp / 1000;
+
+  update(dt);
+
+  // Clear
+  ctx.fillStyle = '#050510';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  drawStars(time);
+
+  for (const s of spheres) drawSphere(s);
+
+  drawDestination(time);
+  drawTrail();
+
+  if (state === 'playing' || state === 'win' || state === 'ready' || state === 'intro') drawRocket(time);
+  if (state === 'dead') {
+    // Explosion particles
+    const t = messageTimer;
+    for (let i = 0; i < 12; i++) {
+      const a = (i / 12) * Math.PI * 2;
+      const r = t * 80;
+      const px = rocket.x + Math.cos(a) * r;
+      const py = rocket.y + Math.sin(a) * r;
+      const alpha = Math.max(0, 1 - t);
+      ctx.fillStyle = `rgba(255, ${100 + i * 10}, 20, ${alpha})`;
+      ctx.beginPath();
+      ctx.arc(px, py, 3 - t * 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  drawHUD();
+  drawMessage(time);
+
+  // Intro circle contracting to rocket
+  if (state === 'intro') {
+    ctx.save();
+    // Glowing ring
+    ctx.strokeStyle = 'rgba(100, 180, 255, 0.8)';
+    ctx.lineWidth = 3;
+    ctx.shadowColor = 'rgba(100, 180, 255, 0.6)';
+    ctx.shadowBlur = 20;
+    ctx.beginPath();
+    ctx.arc(rocket.x, rocket.y, Math.max(introRadius, 0), 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // Instructions on first level
+  if (level === 1 && state === 'playing' && fuel > 95) {
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.fillStyle = 'rgba(255,255,255,0.3)';
+    ctx.font = '14px monospace';
+    ctx.fillText('hold SPACE or CLICK to thrust', canvas.width / 2, canvas.height - 40);
+    ctx.fillText('reach the green beacon', canvas.width / 2, canvas.height - 60);
+    ctx.restore();
+  }
+
+  requestAnimationFrame(gameLoop);
+}
+
+init();
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
