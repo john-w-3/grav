@@ -178,20 +178,11 @@ function hitTestVehBtn(px, py) {
   return px >= b.x && px <= b.x + VEH_BTN.w && py >= b.y && py <= b.y + VEH_BTN.h;
 }
 
-// Compute ship thrust angle: 1 finger = away from point, 2 fingers = toward point
+// Compute ship thrust angle: 1 finger = away from point, 2+ fingers = toward point
+// Always uses first finger position; second finger is just a reverse toggle
 function shipThrustAngle(x, y) {
   const base = Math.atan2(y - rocket.y, x - rocket.x);
   return touchCount >= 2 ? base : base + Math.PI;
-}
-
-// Get midpoint of all active touches
-function touchMidpoint(touches) {
-  let mx = 0, my = 0;
-  for (let i = 0; i < touches.length; i++) {
-    mx += touches[i].clientX;
-    my += touches[i].clientY;
-  }
-  return { x: mx / touches.length, y: my / touches.length };
 }
 
 function handleInputDown(x, y) {
@@ -248,27 +239,29 @@ canvas.addEventListener('mouseup', () => { touchCount = 0; stopThrust(); });
 canvas.addEventListener('touchstart', (e) => {
   e.preventDefault();
   touchCount = e.touches.length;
-  const mid = touchMidpoint(e.touches);
-  if (touchCount === 1) touchStartX = mid.x;
+  const tx = e.touches[0].clientX;
+  const ty = e.touches[0].clientY;
+  if (touchCount === 1) touchStartX = tx;
   steering = 0;
-  // If already thrusting with ship and a second finger lands, just update angle
+  // If already thrusting with ship and a second finger lands, just flip direction
   if (vehicleType === 'ship' && thrusting && state === 'playing') {
-    rocket.angle = shipThrustAngle(mid.x, mid.y);
+    rocket.angle = shipThrustAngle(tx, ty);
     return;
   }
-  handleInputDown(mid.x, mid.y);
+  handleInputDown(tx, ty);
 });
 canvas.addEventListener('touchmove', (e) => {
   e.preventDefault();
   touchCount = e.touches.length;
-  const mid = touchMidpoint(e.touches);
-  touchWorldX = mid.x;
-  touchWorldY = mid.y;
+  const tx = e.touches[0].clientX;
+  const ty = e.touches[0].clientY;
+  touchWorldX = tx;
+  touchWorldY = ty;
   if (vehicleType === 'rocket') {
-    const dx = e.touches[0].clientX - touchStartX;
+    const dx = tx - touchStartX;
     steering = Math.max(-1, Math.min(1, dx / 80));
   } else if (vehicleType === 'ship' && state === 'playing') {
-    rocket.angle = shipThrustAngle(mid.x, mid.y);
+    rocket.angle = shipThrustAngle(tx, ty);
   }
 });
 canvas.addEventListener('touchend', (e) => {
@@ -278,9 +271,10 @@ canvas.addEventListener('touchend', (e) => {
     stopThrust();
     steering = 0;
   } else if (vehicleType === 'ship' && state === 'playing') {
-    // Finger lifted but still touching — update angle with remaining fingers
-    const mid = touchMidpoint(e.touches);
-    rocket.angle = shipThrustAngle(mid.x, mid.y);
+    // Finger lifted — update angle with first remaining finger
+    const tx = e.touches[0].clientX;
+    const ty = e.touches[0].clientY;
+    rocket.angle = shipThrustAngle(tx, ty);
   }
 });
 
