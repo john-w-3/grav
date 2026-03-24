@@ -179,10 +179,19 @@ function hitTestVehBtn(px, py) {
 }
 
 // Compute ship thrust angle: 1 finger = away from point, 2+ fingers = toward point
-// Always uses first finger position; second finger is just a reverse toggle
 function shipThrustAngle(x, y) {
   const base = Math.atan2(y - rocket.y, x - rocket.x);
   return touchCount >= 2 ? base : base + Math.PI;
+}
+
+// Get midpoint of all active touches
+function touchMidpoint(touches) {
+  let mx = 0, my = 0;
+  for (let i = 0; i < touches.length; i++) {
+    mx += touches[i].clientX;
+    my += touches[i].clientY;
+  }
+  return { x: mx / touches.length, y: my / touches.length };
 }
 
 function handleInputDown(x, y) {
@@ -239,29 +248,27 @@ canvas.addEventListener('mouseup', () => { touchCount = 0; stopThrust(); });
 canvas.addEventListener('touchstart', (e) => {
   e.preventDefault();
   touchCount = e.touches.length;
-  const tx = e.touches[0].clientX;
-  const ty = e.touches[0].clientY;
-  if (touchCount === 1) touchStartX = tx;
+  const mid = touchMidpoint(e.touches);
+  if (touchCount === 1) touchStartX = mid.x;
   steering = 0;
-  // If already thrusting with ship and a second finger lands, just flip direction
+  // If already thrusting with ship and a second finger lands, update angle with midpoint
   if (vehicleType === 'ship' && thrusting && state === 'playing') {
-    rocket.angle = shipThrustAngle(tx, ty);
+    rocket.angle = shipThrustAngle(mid.x, mid.y);
     return;
   }
-  handleInputDown(tx, ty);
+  handleInputDown(mid.x, mid.y);
 });
 canvas.addEventListener('touchmove', (e) => {
   e.preventDefault();
   touchCount = e.touches.length;
-  const tx = e.touches[0].clientX;
-  const ty = e.touches[0].clientY;
-  touchWorldX = tx;
-  touchWorldY = ty;
+  const mid = touchMidpoint(e.touches);
+  touchWorldX = mid.x;
+  touchWorldY = mid.y;
   if (vehicleType === 'rocket') {
-    const dx = tx - touchStartX;
+    const dx = e.touches[0].clientX - touchStartX;
     steering = Math.max(-1, Math.min(1, dx / 80));
   } else if (vehicleType === 'ship' && state === 'playing') {
-    rocket.angle = shipThrustAngle(tx, ty);
+    rocket.angle = shipThrustAngle(mid.x, mid.y);
   }
 });
 canvas.addEventListener('touchend', (e) => {
@@ -271,10 +278,8 @@ canvas.addEventListener('touchend', (e) => {
     stopThrust();
     steering = 0;
   } else if (vehicleType === 'ship' && state === 'playing') {
-    // Finger lifted — update angle with first remaining finger
-    const tx = e.touches[0].clientX;
-    const ty = e.touches[0].clientY;
-    rocket.angle = shipThrustAngle(tx, ty);
+    const mid = touchMidpoint(e.touches);
+    rocket.angle = shipThrustAngle(mid.x, mid.y);
   }
 });
 
@@ -429,6 +434,43 @@ function drawDestination(time) {
   ctx.closePath();
   ctx.stroke();
   ctx.restore();
+}
+
+function drawTrajectory() {
+  if (state !== 'playing' && state !== 'ready') return;
+  const steps = 350;
+  const simDt = 0.02;
+  let sx = rocket.x, sy = rocket.y, svx = rocket.vx, svy = rocket.vy;
+  const points = [{ x: sx, y: sy }];
+
+  for (let i = 0; i < steps; i++) {
+    let hit = false;
+    for (const s of spheres) {
+      const dx = s.x - sx, dy = s.y - sy;
+      const distSq = dx * dx + dy * dy;
+      const dist = Math.sqrt(distSq);
+      if (dist < s.radius) { hit = true; break; }
+      const force = G * s.mass / distSq;
+      svx += (dx / dist) * force * simDt;
+      svy += (dy / dist) * force * simDt;
+    }
+    if (hit) break;
+    sx += svx * simDt;
+    sy += svy * simDt;
+    if (sx < -50 || sx > canvas.width + 50 || sy < -50 || sy > canvas.height + 50) break;
+    points.push({ x: sx, y: sy });
+  }
+
+  for (let i = 1; i < points.length; i++) {
+    const alpha = (1 - i / points.length) * 0.7;
+    if (i % 3 === 0) continue; // dashed effect
+    ctx.strokeStyle = `rgba(255, 60, 60, ${alpha})`;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(points[i - 1].x, points[i - 1].y);
+    ctx.lineTo(points[i].x, points[i].y);
+    ctx.stroke();
+  }
 }
 
 function drawTrail() {
@@ -835,6 +877,7 @@ function gameLoop(timestamp) {
 
   drawDestination(time);
   drawTrail();
+  drawTrajectory();
 
   if (state === 'playing' || state === 'win' || state === 'ready' || state === 'intro') {
     if (vehicleType === 'ship') drawShip(time);
