@@ -27,7 +27,7 @@ window.addEventListener('resize', resize);
 window.addEventListener('orientationchange', () => setTimeout(resize, 100));
 
 // --- Constants ---
-const G = 0.06;
+const G = 0.1;
 const THRUST_POWER = 10;
 const DEST_RADIUS = 18;
 const ROCKET_SIZE = 10;
@@ -41,6 +41,10 @@ let touchStartX = 0;
 let steering = 0; // -1 to 1
 let fuel = 100;
 const MAX_FUEL = 100;
+let showGravField = false;
+let vehicleType = 'rocket'; // 'rocket' or 'ship'
+let touchWorldX = 0, touchWorldY = 0; // current touch/mouse position for ship thrust direction
+let touchCount = 0; // number of active touches (for ship reverse thrust)
 
 function rand(min, max) { return Math.random() * (max - min) + min; }
 
@@ -142,10 +146,8 @@ function initLevel(lvl) {
   // Point rocket at destination
   rocket.angle = Math.atan2(destination.y - rocket.y, destination.x - rocket.x);
 
-  // Give rocket an initial drift toward the destination
-  const initSpeed = 30;
-  rocket.vx = Math.cos(rocket.angle) * initSpeed;
-  rocket.vy = Math.sin(rocket.angle) * initSpeed;
+  rocket.vx = 0;
+  rocket.vy = 0;
 
   trail = [];
   fuel = MAX_FUEL;
@@ -165,8 +167,57 @@ function init() {
 function startThrust() { thrusting = true; }
 function stopThrust() { thrusting = false; }
 
+// Vehicle toggle button
+const VEH_BTN = { w: 36, h: 36, margin: 16 };
+function getVehBtnPos() {
+  const gb = getGravBtnPos();
+  return { x: gb.x - VEH_BTN.w - 10, y: VEH_BTN.margin };
+}
+function hitTestVehBtn(px, py) {
+  const b = getVehBtnPos();
+  return px >= b.x && px <= b.x + VEH_BTN.w && py >= b.y && py <= b.y + VEH_BTN.h;
+}
+
+// Compute ship thrust angle: 1 finger = away from point, 2 fingers = toward point
+function shipThrustAngle(x, y) {
+  const base = Math.atan2(y - rocket.y, x - rocket.x);
+  return touchCount >= 2 ? base : base + Math.PI;
+}
+
+// Get midpoint of all active touches
+function touchMidpoint(touches) {
+  let mx = 0, my = 0;
+  for (let i = 0; i < touches.length; i++) {
+    mx += touches[i].clientX;
+    my += touches[i].clientY;
+  }
+  return { x: mx / touches.length, y: my / touches.length };
+}
+
+function handleInputDown(x, y) {
+  if (hitTestGravBtn(x, y)) { showGravField = !showGravField; return; }
+  if (hitTestVehBtn(x, y)) {
+    vehicleType = vehicleType === 'rocket' ? 'ship' : 'rocket';
+    return;
+  }
+  touchWorldX = x;
+  touchWorldY = y;
+  if (state === 'ready') { state = 'playing'; }
+  if (state === 'playing') {
+    if (vehicleType === 'ship') {
+      rocket.angle = shipThrustAngle(x, y);
+    }
+    startThrust();
+  } else if (state === 'win' || state === 'dead') {
+    if (state === 'win') initLevel(level + 1);
+    else initLevel(level);
+  }
+}
+
 window.addEventListener('keydown', (e) => {
   if (e.repeat) return;
+  if (e.code === 'KeyG') { showGravField = !showGravField; return; }
+  if (e.code === 'KeyV') { vehicleType = vehicleType === 'rocket' ? 'ship' : 'rocket'; return; }
   if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') {
     e.preventDefault();
     if (state === 'ready') { state = 'playing'; }
@@ -182,30 +233,56 @@ window.addEventListener('keyup', (e) => {
 });
 
 canvas.addEventListener('mousedown', (e) => {
-  if (state === 'playing') startThrust();
-  else if (state === 'win' || state === 'dead') {
-    if (state === 'win') initLevel(level + 1);
-    else initLevel(level);
+  touchCount = 1;
+  handleInputDown(e.clientX, e.clientY);
+});
+canvas.addEventListener('mousemove', (e) => {
+  if (!thrusting) return;
+  touchWorldX = e.clientX;
+  touchWorldY = e.clientY;
+  if (vehicleType === 'ship' && state === 'playing') {
+    rocket.angle = shipThrustAngle(e.clientX, e.clientY);
   }
 });
-canvas.addEventListener('mouseup', stopThrust);
+canvas.addEventListener('mouseup', () => { touchCount = 0; stopThrust(); });
 canvas.addEventListener('touchstart', (e) => {
   e.preventDefault();
-  touchStartX = e.touches[0].clientX;
+  touchCount = e.touches.length;
+  const mid = touchMidpoint(e.touches);
+  if (touchCount === 1) touchStartX = mid.x;
   steering = 0;
-  if (state === 'ready') { state = 'playing'; }
-  else if (state === 'playing') startThrust();
-  else if (state === 'win' || state === 'dead') {
-    if (state === 'win') initLevel(level + 1);
-    else initLevel(level);
+  // If already thrusting with ship and a second finger lands, just update angle
+  if (vehicleType === 'ship' && thrusting && state === 'playing') {
+    rocket.angle = shipThrustAngle(mid.x, mid.y);
+    return;
   }
+  handleInputDown(mid.x, mid.y);
 });
 canvas.addEventListener('touchmove', (e) => {
   e.preventDefault();
-  const dx = e.touches[0].clientX - touchStartX;
-  steering = Math.max(-1, Math.min(1, dx / 80));
+  touchCount = e.touches.length;
+  const mid = touchMidpoint(e.touches);
+  touchWorldX = mid.x;
+  touchWorldY = mid.y;
+  if (vehicleType === 'rocket') {
+    const dx = e.touches[0].clientX - touchStartX;
+    steering = Math.max(-1, Math.min(1, dx / 80));
+  } else if (vehicleType === 'ship' && state === 'playing') {
+    rocket.angle = shipThrustAngle(mid.x, mid.y);
+  }
 });
-canvas.addEventListener('touchend', (e) => { e.preventDefault(); stopThrust(); steering = 0; });
+canvas.addEventListener('touchend', (e) => {
+  e.preventDefault();
+  touchCount = e.touches.length;
+  if (touchCount === 0) {
+    stopThrust();
+    steering = 0;
+  } else if (vehicleType === 'ship' && state === 'playing') {
+    // Finger lifted but still touching — update angle with remaining fingers
+    const mid = touchMidpoint(e.touches);
+    rocket.angle = shipThrustAngle(mid.x, mid.y);
+  }
+});
 
 // --- Update ---
 function update(dt) {
@@ -252,8 +329,8 @@ function update(dt) {
     // if (fuel < 0) fuel = 0;
   }
 
-  // Steering: drag left/right to rotate; angle stays fixed otherwise
-  if (steering !== 0) {
+  // Steering: rocket uses drag left/right to rotate; ship steers via tap direction
+  if (vehicleType === 'rocket' && steering !== 0) {
     rocket.angle += steering * 3.5 * dt;
   }
 
@@ -435,6 +512,258 @@ function drawRocket(time) {
   ctx.restore();
 }
 
+function drawShip(time) {
+  ctx.save();
+  ctx.translate(rocket.x, rocket.y);
+
+  // Flame when thrusting — drawn behind the ship, opposite to thrust direction
+  if (thrusting && state === 'playing') {
+    const reverse = touchCount >= 2;
+    ctx.save();
+    ctx.rotate(rocket.angle + Math.PI); // opposite to thrust
+    const flicker = rand(0.7, 1.3);
+    const flameLen = 20 * flicker;
+
+    // Glow — orange for reverse, blue for normal
+    const glow = ctx.createRadialGradient(0, 0, 0, 0, 0, flameLen * 1.5);
+    glow.addColorStop(0, reverse
+      ? `rgba(255, 150, 50, ${0.3 * flicker})`
+      : `rgba(100, 180, 255, ${0.3 * flicker})`);
+    glow.addColorStop(1, reverse
+      ? `rgba(255, 100, 0, 0)`
+      : `rgba(80, 140, 255, 0)`);
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(0, 0, flameLen * 1.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Outer flame
+    ctx.fillStyle = reverse
+      ? `rgba(255, 100, 20, ${0.7 * flicker})`
+      : `rgba(80, 160, 255, ${0.7 * flicker})`;
+    ctx.beginPath();
+    ctx.moveTo(-5, 0);
+    ctx.lineTo(flameLen * 0.4, -6);
+    ctx.lineTo(flameLen, 0);
+    ctx.lineTo(flameLen * 0.4, 6);
+    ctx.lineTo(-5, 0);
+    ctx.fill();
+
+    // Inner flame
+    ctx.fillStyle = reverse
+      ? `rgba(255, 220, 100, ${0.9 * flicker})`
+      : `rgba(200, 230, 255, ${0.9 * flicker})`;
+    ctx.beginPath();
+    ctx.moveTo(-3, 0);
+    ctx.lineTo(flameLen * 0.25, -3);
+    ctx.lineTo(flameLen * 0.5, 0);
+    ctx.lineTo(flameLen * 0.25, 3);
+    ctx.lineTo(-3, 0);
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  // Ship body — hexagonal saucer shape (no rotation, ship itself stays flat)
+  const S = ROCKET_SIZE * 1.1;
+
+  // Hull glow
+  const hullGlow = ctx.createRadialGradient(0, 0, S * 0.2, 0, 0, S * 1.6);
+  hullGlow.addColorStop(0, 'rgba(80, 200, 255, 0.08)');
+  hullGlow.addColorStop(1, 'rgba(80, 200, 255, 0)');
+  ctx.fillStyle = hullGlow;
+  ctx.beginPath();
+  ctx.arc(0, 0, S * 1.6, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Main hull
+  ctx.fillStyle = '#b8c8d8';
+  ctx.beginPath();
+  for (let i = 0; i < 6; i++) {
+    const a = (i / 6) * Math.PI * 2 - Math.PI / 6;
+    const px = Math.cos(a) * S;
+    const py = Math.sin(a) * S;
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.fill();
+
+  // Dark inner ring
+  ctx.fillStyle = '#3a4a5a';
+  ctx.beginPath();
+  ctx.arc(0, 0, S * 0.55, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Cockpit dome
+  ctx.fillStyle = '#4af';
+  ctx.beginPath();
+  ctx.arc(0, 0, S * 0.35, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Thruster nubs (4 cardinal points)
+  ctx.fillStyle = '#8898a8';
+  for (let i = 0; i < 4; i++) {
+    const a = (i / 4) * Math.PI * 2;
+    const nx = Math.cos(a) * S * 0.95;
+    const ny = Math.sin(a) * S * 0.95;
+    ctx.beginPath();
+    ctx.arc(nx, ny, 2.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.restore();
+}
+
+function drawGravityField(time) {
+  if (!showGravField) return;
+  const spacing = 40;
+  const cols = Math.ceil(canvas.width / spacing) + 1;
+  const rows = Math.ceil(canvas.height / spacing) + 1;
+
+  // Compute displaced grid positions
+  const grid = [];
+  for (let r = 0; r < rows; r++) {
+    grid[r] = [];
+    for (let c = 0; c < cols; c++) {
+      let x = c * spacing;
+      let y = r * spacing;
+      let totalForce = 0;
+      for (const s of spheres) {
+        const dx = s.x - x;
+        const dy = s.y - y;
+        const distSq = dx * dx + dy * dy;
+        const dist = Math.sqrt(distSq);
+        const pull = Math.min(G * s.mass / distSq, spacing * 0.8);
+        totalForce += pull;
+        x += (dx / dist) * pull;
+        y += (dy / dist) * pull;
+      }
+      grid[r][c] = { x, y, force: totalForce };
+    }
+  }
+
+  ctx.lineWidth = 0.6;
+
+  // Draw horizontal lines
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols - 1; c++) {
+      const a = grid[r][c];
+      const b = grid[r][c + 1];
+      const force = (a.force + b.force) * 0.5;
+      const intensity = Math.min(force * 0.15, 1);
+      const hue = 220 - intensity * 160; // blue -> orange near masses
+      const alpha = 0.12 + intensity * 0.5;
+      ctx.strokeStyle = `hsla(${hue}, 80%, ${50 + intensity * 30}%, ${alpha})`;
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+    }
+  }
+
+  // Draw vertical lines
+  for (let c = 0; c < cols; c++) {
+    for (let r = 0; r < rows - 1; r++) {
+      const a = grid[r][c];
+      const b = grid[r + 1][c];
+      const force = (a.force + b.force) * 0.5;
+      const intensity = Math.min(force * 0.15, 1);
+      const hue = 220 - intensity * 160;
+      const alpha = 0.12 + intensity * 0.5;
+      ctx.strokeStyle = `hsla(${hue}, 80%, ${50 + intensity * 30}%, ${alpha})`;
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+    }
+  }
+}
+
+// Gravity field toggle button
+const GRAV_BTN = { w: 36, h: 36, margin: 16 };
+function getGravBtnPos() {
+  return { x: canvas.width - GRAV_BTN.w - GRAV_BTN.margin, y: GRAV_BTN.margin };
+}
+function hitTestGravBtn(px, py) {
+  const b = getGravBtnPos();
+  return px >= b.x && px <= b.x + GRAV_BTN.w && py >= b.y && py <= b.y + GRAV_BTN.h;
+}
+function drawGravBtn() {
+  const b = getGravBtnPos();
+  const active = showGravField;
+  // Background
+  ctx.fillStyle = active ? 'rgba(100, 180, 255, 0.25)' : 'rgba(255,255,255,0.08)';
+  ctx.beginPath();
+  ctx.roundRect(b.x, b.y, GRAV_BTN.w, GRAV_BTN.h, 8);
+  ctx.fill();
+  ctx.strokeStyle = active ? 'rgba(100, 180, 255, 0.6)' : 'rgba(255,255,255,0.2)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.roundRect(b.x, b.y, GRAV_BTN.w, GRAV_BTN.h, 8);
+  ctx.stroke();
+  // Grid icon (small 3x3 warped grid)
+  const cx = b.x + GRAV_BTN.w / 2;
+  const cy = b.y + GRAV_BTN.h / 2;
+  const s = 8;
+  ctx.strokeStyle = active ? 'rgba(100, 180, 255, 0.9)' : 'rgba(255,255,255,0.4)';
+  ctx.lineWidth = 1;
+  // Horizontal lines (slightly curved)
+  for (let r = -1; r <= 1; r++) {
+    ctx.beginPath();
+    ctx.moveTo(cx - s, cy + r * s);
+    ctx.quadraticCurveTo(cx, cy + r * s + (r === 0 ? 0 : (r > 0 ? 2 : -2)), cx + s, cy + r * s);
+    ctx.stroke();
+  }
+  // Vertical lines (slightly curved)
+  for (let c = -1; c <= 1; c++) {
+    ctx.beginPath();
+    ctx.moveTo(cx + c * s, cy - s);
+    ctx.quadraticCurveTo(cx + c * s + (c === 0 ? 0 : (c > 0 ? 2 : -2)), cy, cx + c * s, cy + s);
+    ctx.stroke();
+  }
+}
+
+function drawVehBtn() {
+  const b = getVehBtnPos();
+  const isShip = vehicleType === 'ship';
+  // Background
+  ctx.fillStyle = isShip ? 'rgba(80, 200, 255, 0.25)' : 'rgba(255,255,255,0.08)';
+  ctx.beginPath();
+  ctx.roundRect(b.x, b.y, VEH_BTN.w, VEH_BTN.h, 8);
+  ctx.fill();
+  ctx.strokeStyle = isShip ? 'rgba(80, 200, 255, 0.6)' : 'rgba(255,255,255,0.2)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.roundRect(b.x, b.y, VEH_BTN.w, VEH_BTN.h, 8);
+  ctx.stroke();
+  // Icon
+  const cx = b.x + VEH_BTN.w / 2;
+  const cy = b.y + VEH_BTN.h / 2;
+  ctx.fillStyle = isShip ? 'rgba(80, 200, 255, 0.9)' : 'rgba(255,255,255,0.4)';
+  if (isShip) {
+    // Hexagon icon
+    ctx.beginPath();
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2 - Math.PI / 6;
+      const px = cx + Math.cos(a) * 8;
+      const py = cy + Math.sin(a) * 8;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fill();
+  } else {
+    // Triangle/rocket icon
+    ctx.beginPath();
+    ctx.moveTo(cx + 9, cy);
+    ctx.lineTo(cx - 6, cy - 6);
+    ctx.lineTo(cx - 6, cy + 6);
+    ctx.closePath();
+    ctx.fill();
+  }
+}
+
 function drawHUD() {
   // Level
   ctx.fillStyle = 'rgba(255,255,255,0.4)';
@@ -449,6 +778,9 @@ function drawHUD() {
     ctx.fillStyle = 'rgba(0, 255, 150, 0.5)';
     ctx.fillText(`${Math.round(dist)}m`, 20, 50);
   }
+
+  drawGravBtn();
+  drawVehBtn();
 }
 
 function drawMessage(time) {
@@ -503,13 +835,17 @@ function gameLoop(timestamp) {
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   drawStars(time);
+  drawGravityField(time);
 
   for (const s of spheres) drawSphere(s);
 
   drawDestination(time);
   drawTrail();
 
-  if (state === 'playing' || state === 'win' || state === 'ready' || state === 'intro') drawRocket(time);
+  if (state === 'playing' || state === 'win' || state === 'ready' || state === 'intro') {
+    if (vehicleType === 'ship') drawShip(time);
+    else drawRocket(time);
+  }
   if (state === 'dead') {
     // Explosion particles
     const t = messageTimer;
@@ -549,7 +885,11 @@ function gameLoop(timestamp) {
     ctx.textAlign = 'center';
     ctx.fillStyle = 'rgba(255,255,255,0.3)';
     ctx.font = '14px monospace';
-    ctx.fillText('hold SPACE or CLICK to thrust', canvas.width / 2, canvas.height - 40);
+    if (vehicleType === 'ship') {
+      ctx.fillText('1 finger: push away · 2 fingers: pull toward', canvas.width / 2, canvas.height - 40);
+    } else {
+      ctx.fillText('hold SPACE or CLICK to thrust', canvas.width / 2, canvas.height - 40);
+    }
     ctx.fillText('reach the green beacon', canvas.width / 2, canvas.height - 60);
     ctx.restore();
   }
