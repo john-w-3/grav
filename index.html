@@ -45,6 +45,12 @@ let showGravField = false;
 let vehicleType = 'rocket'; // 'rocket' or 'ship'
 let touchWorldX = 0, touchWorldY = 0; // current touch/mouse position for ship thrust direction
 let touchCount = 0; // number of active touches (for ship reverse thrust)
+// Joystick state for ship control
+let joyOriginX = 0, joyOriginY = 0; // where the touch started (joystick center)
+let joyDX = 0, joyDY = 0; // current drag offset from origin
+let joyActive = false; // whether joystick is being dragged beyond dead zone
+const JOY_DEADZONE = 15; // pixels of drag before thrust engages
+let joyInvert = false; // invert joystick direction
 
 function rand(min, max) { return Math.random() * (max - min) + min; }
 
@@ -178,10 +184,22 @@ function hitTestVehBtn(px, py) {
   return px >= b.x && px <= b.x + VEH_BTN.w && py >= b.y && py <= b.y + VEH_BTN.h;
 }
 
-// Compute ship thrust angle: 1 finger = away from point, 2+ fingers = toward point
-function shipThrustAngle(x, y) {
-  const base = Math.atan2(y - rocket.y, x - rocket.x);
-  return touchCount >= 2 ? base : base + Math.PI;
+// Invert joystick toggle button (only visible in ship mode)
+const INV_BTN = { w: 36, h: 36, margin: 16 };
+function getInvBtnPos() {
+  const vb = getVehBtnPos();
+  return { x: vb.x - INV_BTN.w - 10, y: INV_BTN.margin };
+}
+function hitTestInvBtn(px, py) {
+  if (vehicleType !== 'ship') return false;
+  const b = getInvBtnPos();
+  return px >= b.x && px <= b.x + INV_BTN.w && py >= b.y && py <= b.y + INV_BTN.h;
+}
+
+// Compute ship thrust angle from joystick drag offset
+function shipJoyAngle() {
+  const s = joyInvert ? -1 : 1;
+  return Math.atan2(joyDY * s, joyDX * s);
 }
 
 // Get midpoint of all active touches
@@ -200,12 +218,21 @@ function handleInputDown(x, y) {
     vehicleType = vehicleType === 'rocket' ? 'ship' : 'rocket';
     return;
   }
+  if (hitTestInvBtn(x, y)) {
+    joyInvert = !joyInvert;
+    return;
+  }
   touchWorldX = x;
   touchWorldY = y;
   if (state === 'ready') { state = 'playing'; }
   if (state === 'playing') {
     if (vehicleType === 'ship') {
-      rocket.angle = shipThrustAngle(x, y);
+      // Record joystick origin — thrust starts once dragged past dead zone
+      joyOriginX = x;
+      joyOriginY = y;
+      joyDX = 0;
+      joyDY = 0;
+      joyActive = false;
     }
     startThrust();
   } else if (state === 'win' || state === 'dead') {
@@ -241,19 +268,30 @@ canvas.addEventListener('mousemove', (e) => {
   touchWorldX = e.clientX;
   touchWorldY = e.clientY;
   if (vehicleType === 'ship' && state === 'playing') {
-    rocket.angle = shipThrustAngle(e.clientX, e.clientY);
+    joyDX = e.clientX - joyOriginX;
+    joyDY = e.clientY - joyOriginY;
+    const dist = Math.sqrt(joyDX * joyDX + joyDY * joyDY);
+    if (dist > JOY_DEADZONE) {
+      joyActive = true;
+      rocket.angle = shipJoyAngle();
+    }
   }
 });
-canvas.addEventListener('mouseup', () => { touchCount = 0; stopThrust(); });
+canvas.addEventListener('mouseup', () => {
+  touchCount = 0;
+  joyActive = false;
+  joyDX = 0;
+  joyDY = 0;
+  stopThrust();
+});
 canvas.addEventListener('touchstart', (e) => {
   e.preventDefault();
   touchCount = e.touches.length;
   const mid = touchMidpoint(e.touches);
   if (touchCount === 1) touchStartX = mid.x;
   steering = 0;
-  // If already thrusting with ship and a second finger lands, update angle with midpoint
+  // Second finger just toggles reverse, don't reset joystick
   if (vehicleType === 'ship' && thrusting && state === 'playing') {
-    rocket.angle = shipThrustAngle(mid.x, mid.y);
     return;
   }
   handleInputDown(mid.x, mid.y);
@@ -268,7 +306,14 @@ canvas.addEventListener('touchmove', (e) => {
     const dx = e.touches[0].clientX - touchStartX;
     steering = Math.max(-1, Math.min(1, dx / 80));
   } else if (vehicleType === 'ship' && state === 'playing') {
-    rocket.angle = shipThrustAngle(mid.x, mid.y);
+    // Use first finger for joystick direction
+    joyDX = e.touches[0].clientX - joyOriginX;
+    joyDY = e.touches[0].clientY - joyOriginY;
+    const dist = Math.sqrt(joyDX * joyDX + joyDY * joyDY);
+    if (dist > JOY_DEADZONE) {
+      joyActive = true;
+      rocket.angle = shipJoyAngle();
+    }
   }
 });
 canvas.addEventListener('touchend', (e) => {
@@ -277,9 +322,9 @@ canvas.addEventListener('touchend', (e) => {
   if (touchCount === 0) {
     stopThrust();
     steering = 0;
-  } else if (vehicleType === 'ship' && state === 'playing') {
-    const mid = touchMidpoint(e.touches);
-    rocket.angle = shipThrustAngle(mid.x, mid.y);
+    joyActive = false;
+    joyDX = 0;
+    joyDY = 0;
   }
 });
 
@@ -320,8 +365,9 @@ function update(dt) {
     rocket.vy += (dy / dist) * force * dt;
   }
 
-  // Thrust
-  if (thrusting && fuel > 0) {
+  // Thrust — ship only thrusts when joystick is dragged past dead zone
+  const canThrust = vehicleType === 'ship' ? (thrusting && joyActive) : thrusting;
+  if (canThrust && fuel > 0) {
     rocket.vx += Math.cos(rocket.angle) * THRUST_POWER * dt;
     rocket.vy += Math.sin(rocket.angle) * THRUST_POWER * dt;
     // fuel -= 25 * dt;
@@ -553,7 +599,7 @@ function drawShip(time) {
   ctx.translate(rocket.x, rocket.y);
 
   // Flame when thrusting — drawn behind the ship, opposite to thrust direction
-  if (thrusting && state === 'playing') {
+  if (thrusting && joyActive && state === 'playing') {
     const reverse = touchCount >= 2;
     ctx.save();
     ctx.rotate(rocket.angle + Math.PI); // opposite to thrust
@@ -800,6 +846,86 @@ function drawVehBtn() {
   }
 }
 
+function drawInvBtn() {
+  if (vehicleType !== 'ship') return;
+  const b = getInvBtnPos();
+  const active = joyInvert;
+  ctx.fillStyle = active ? 'rgba(255, 120, 80, 0.25)' : 'rgba(255,255,255,0.08)';
+  ctx.beginPath();
+  ctx.roundRect(b.x, b.y, INV_BTN.w, INV_BTN.h, 8);
+  ctx.fill();
+  ctx.strokeStyle = active ? 'rgba(255, 120, 80, 0.6)' : 'rgba(255,255,255,0.2)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.roundRect(b.x, b.y, INV_BTN.w, INV_BTN.h, 8);
+  ctx.stroke();
+  // Two opposing arrows icon
+  const cx = b.x + INV_BTN.w / 2;
+  const cy = b.y + INV_BTN.h / 2;
+  const col = active ? 'rgba(255, 120, 80, 0.9)' : 'rgba(255,255,255,0.4)';
+  ctx.strokeStyle = col;
+  ctx.fillStyle = col;
+  ctx.lineWidth = 1.5;
+  // Up-left arrow
+  ctx.beginPath();
+  ctx.moveTo(cx + 5, cy + 5);
+  ctx.lineTo(cx - 5, cy - 5);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(cx - 5, cy - 5);
+  ctx.lineTo(cx - 1, cy - 5);
+  ctx.lineTo(cx - 5, cy - 1);
+  ctx.closePath();
+  ctx.fill();
+  // Down-right arrow
+  ctx.beginPath();
+  ctx.moveTo(cx - 5, cy - 5);
+  ctx.lineTo(cx + 5, cy + 5);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(cx + 5, cy + 5);
+  ctx.lineTo(cx + 1, cy + 5);
+  ctx.lineTo(cx + 5, cy + 1);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawJoystick() {
+  if (vehicleType !== 'ship' || !thrusting || state !== 'playing') return;
+  ctx.save();
+  // Outer ring at touch origin
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.arc(joyOriginX, joyOriginY, JOY_DEADZONE, 0, Math.PI * 2);
+  ctx.stroke();
+  // Drag line + knob
+  if (joyActive) {
+    const dist = Math.sqrt(joyDX * joyDX + joyDY * joyDY);
+    const maxShow = 50;
+    const clamp = Math.min(dist, maxShow);
+    const nx = joyDX / dist, ny = joyDY / dist;
+    const kx = joyOriginX + nx * clamp;
+    const ky = joyOriginY + ny * clamp;
+    ctx.strokeStyle = 'rgba(80, 200, 255, 0.3)';
+    ctx.beginPath();
+    ctx.moveTo(joyOriginX, joyOriginY);
+    ctx.lineTo(kx, ky);
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(80, 200, 255, 0.5)';
+    ctx.beginPath();
+    ctx.arc(kx, ky, 6, 0, Math.PI * 2);
+    ctx.fill();
+  } else {
+    // Dead zone hint dot
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.2)';
+    ctx.beginPath();
+    ctx.arc(joyOriginX, joyOriginY, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
 function drawHUD() {
   // Level
   ctx.fillStyle = 'rgba(255,255,255,0.4)';
@@ -817,6 +943,8 @@ function drawHUD() {
 
   drawGravBtn();
   drawVehBtn();
+  drawInvBtn();
+  drawJoystick();
 }
 
 function drawMessage(time) {
@@ -923,7 +1051,7 @@ function gameLoop(timestamp) {
     ctx.fillStyle = 'rgba(255,255,255,0.3)';
     ctx.font = '14px monospace';
     if (vehicleType === 'ship') {
-      ctx.fillText('1 finger: push away · 2 fingers: pull toward', canvas.width / 2, canvas.height - 40);
+      ctx.fillText('tap + drag to thrust · 2 fingers: reverse', canvas.width / 2, canvas.height - 40);
     } else {
       ctx.fillText('hold SPACE or CLICK to thrust', canvas.width / 2, canvas.height - 40);
     }
