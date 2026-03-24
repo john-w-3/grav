@@ -27,7 +27,7 @@ window.addEventListener('resize', resize);
 window.addEventListener('orientationchange', () => setTimeout(resize, 100));
 
 // --- Constants ---
-const G = 0.1;
+const G = 0.3;
 const THRUST_POWER = 10;
 const DEST_RADIUS = 18;
 const ROCKET_SIZE = 10;
@@ -44,13 +44,12 @@ const MAX_FUEL = 100;
 let showGravField = false;
 let vehicleType = 'ship'; // 'rocket' or 'ship'
 let touchWorldX = 0, touchWorldY = 0; // current touch/mouse position for ship thrust direction
-let touchCount = 0; // number of active touches (for ship reverse thrust)
+let touchCount = 0; // number of active touches
 // Joystick state for ship control
 let joyOriginX = 0, joyOriginY = 0; // where the touch started (joystick center)
 let joyDX = 0, joyDY = 0; // current drag offset from origin
 let joyActive = false; // whether joystick is being dragged beyond dead zone
 const JOY_DEADZONE = 15; // pixels of drag before thrust engages
-let joyInvert = false; // invert joystick direction
 
 function rand(min, max) { return Math.random() * (max - min) + min; }
 
@@ -184,22 +183,9 @@ function hitTestVehBtn(px, py) {
   return px >= b.x && px <= b.x + VEH_BTN.w && py >= b.y && py <= b.y + VEH_BTN.h;
 }
 
-// Invert joystick toggle button (only visible in ship mode)
-const INV_BTN = { w: 36, h: 36, margin: 16 };
-function getInvBtnPos() {
-  const vb = getVehBtnPos();
-  return { x: vb.x - INV_BTN.w - 10, y: INV_BTN.margin };
-}
-function hitTestInvBtn(px, py) {
-  if (vehicleType !== 'ship') return false;
-  const b = getInvBtnPos();
-  return px >= b.x && px <= b.x + INV_BTN.w && py >= b.y && py <= b.y + INV_BTN.h;
-}
-
 // Compute ship thrust angle from joystick drag offset
 function shipJoyAngle() {
-  const s = joyInvert ? -1 : 1;
-  return Math.atan2(joyDY * s, joyDX * s);
+  return Math.atan2(joyDY, joyDX);
 }
 
 // Get midpoint of all active touches
@@ -216,10 +202,6 @@ function handleInputDown(x, y) {
   if (hitTestGravBtn(x, y)) { showGravField = !showGravField; return; }
   if (hitTestVehBtn(x, y)) {
     vehicleType = vehicleType === 'rocket' ? 'ship' : 'rocket';
-    return;
-  }
-  if (hitTestInvBtn(x, y)) {
-    joyInvert = !joyInvert;
     return;
   }
   touchWorldX = x;
@@ -290,10 +272,6 @@ canvas.addEventListener('touchstart', (e) => {
   const mid = touchMidpoint(e.touches);
   if (touchCount === 1) touchStartX = mid.x;
   steering = 0;
-  // Second finger just toggles reverse, don't reset joystick
-  if (vehicleType === 'ship' && thrusting && state === 'playing') {
-    return;
-  }
   handleInputDown(mid.x, mid.y);
 });
 canvas.addEventListener('touchmove', (e) => {
@@ -600,29 +578,22 @@ function drawShip(time) {
 
   // Flame when thrusting — drawn behind the ship, opposite to thrust direction
   if (thrusting && joyActive && state === 'playing') {
-    const reverse = touchCount >= 2;
     ctx.save();
     ctx.rotate(rocket.angle + Math.PI); // opposite to thrust
     const flicker = rand(0.7, 1.3);
     const flameLen = 20 * flicker;
 
-    // Glow — orange for reverse, blue for normal
+    // Glow
     const glow = ctx.createRadialGradient(0, 0, 0, 0, 0, flameLen * 1.5);
-    glow.addColorStop(0, reverse
-      ? `rgba(255, 150, 50, ${0.3 * flicker})`
-      : `rgba(100, 180, 255, ${0.3 * flicker})`);
-    glow.addColorStop(1, reverse
-      ? `rgba(255, 100, 0, 0)`
-      : `rgba(80, 140, 255, 0)`);
+    glow.addColorStop(0, `rgba(100, 180, 255, ${0.3 * flicker})`);
+    glow.addColorStop(1, `rgba(80, 140, 255, 0)`);
     ctx.fillStyle = glow;
     ctx.beginPath();
     ctx.arc(0, 0, flameLen * 1.5, 0, Math.PI * 2);
     ctx.fill();
 
     // Outer flame
-    ctx.fillStyle = reverse
-      ? `rgba(255, 100, 20, ${0.7 * flicker})`
-      : `rgba(80, 160, 255, ${0.7 * flicker})`;
+    ctx.fillStyle = `rgba(80, 160, 255, ${0.7 * flicker})`;
     ctx.beginPath();
     ctx.moveTo(-5, 0);
     ctx.lineTo(flameLen * 0.4, -6);
@@ -632,9 +603,7 @@ function drawShip(time) {
     ctx.fill();
 
     // Inner flame
-    ctx.fillStyle = reverse
-      ? `rgba(255, 220, 100, ${0.9 * flicker})`
-      : `rgba(200, 230, 255, ${0.9 * flicker})`;
+    ctx.fillStyle = `rgba(200, 230, 255, ${0.9 * flicker})`;
     ctx.beginPath();
     ctx.moveTo(-3, 0);
     ctx.lineTo(flameLen * 0.25, -3);
@@ -846,49 +815,6 @@ function drawVehBtn() {
   }
 }
 
-function drawInvBtn() {
-  if (vehicleType !== 'ship') return;
-  const b = getInvBtnPos();
-  const active = joyInvert;
-  ctx.fillStyle = active ? 'rgba(255, 120, 80, 0.25)' : 'rgba(255,255,255,0.08)';
-  ctx.beginPath();
-  ctx.roundRect(b.x, b.y, INV_BTN.w, INV_BTN.h, 8);
-  ctx.fill();
-  ctx.strokeStyle = active ? 'rgba(255, 120, 80, 0.6)' : 'rgba(255,255,255,0.2)';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.roundRect(b.x, b.y, INV_BTN.w, INV_BTN.h, 8);
-  ctx.stroke();
-  // Two opposing arrows icon
-  const cx = b.x + INV_BTN.w / 2;
-  const cy = b.y + INV_BTN.h / 2;
-  const col = active ? 'rgba(255, 120, 80, 0.9)' : 'rgba(255,255,255,0.4)';
-  ctx.strokeStyle = col;
-  ctx.fillStyle = col;
-  ctx.lineWidth = 1.5;
-  // Up-left arrow
-  ctx.beginPath();
-  ctx.moveTo(cx + 5, cy + 5);
-  ctx.lineTo(cx - 5, cy - 5);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(cx - 5, cy - 5);
-  ctx.lineTo(cx - 1, cy - 5);
-  ctx.lineTo(cx - 5, cy - 1);
-  ctx.closePath();
-  ctx.fill();
-  // Down-right arrow
-  ctx.beginPath();
-  ctx.moveTo(cx - 5, cy - 5);
-  ctx.lineTo(cx + 5, cy + 5);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(cx + 5, cy + 5);
-  ctx.lineTo(cx + 1, cy + 5);
-  ctx.lineTo(cx + 5, cy + 1);
-  ctx.closePath();
-  ctx.fill();
-}
 
 function drawJoystick() {
   if (vehicleType !== 'ship' || !thrusting || state !== 'playing') return;
@@ -943,7 +869,6 @@ function drawHUD() {
 
   drawGravBtn();
   drawVehBtn();
-  drawInvBtn();
   drawJoystick();
 }
 
@@ -1051,7 +976,7 @@ function gameLoop(timestamp) {
     ctx.fillStyle = 'rgba(255,255,255,0.3)';
     ctx.font = '14px monospace';
     if (vehicleType === 'ship') {
-      ctx.fillText('tap + drag to thrust · 2 fingers: reverse', canvas.width / 2, canvas.height - 40);
+      ctx.fillText('tap + drag to thrust', canvas.width / 2, canvas.height - 40);
     } else {
       ctx.fillText('hold SPACE or CLICK to thrust', canvas.width / 2, canvas.height - 40);
     }
