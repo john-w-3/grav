@@ -27,8 +27,8 @@ window.addEventListener('resize', resize);
 window.addEventListener('orientationchange', () => setTimeout(resize, 100));
 
 // --- Constants ---
-const G = 0.00002;
-const THRUST_POWER = 15;
+const G = 0.06;
+const THRUST_POWER = 10;
 const DEST_RADIUS = 18;
 const ROCKET_SIZE = 10;
 const TRAIL_LENGTH = 60;
@@ -142,6 +142,11 @@ function initLevel(lvl) {
   // Point rocket at destination
   rocket.angle = Math.atan2(destination.y - rocket.y, destination.x - rocket.x);
 
+  // Give rocket an initial drift toward the destination
+  const initSpeed = 30;
+  rocket.vx = Math.cos(rocket.angle) * initSpeed;
+  rocket.vy = Math.sin(rocket.angle) * initSpeed;
+
   trail = [];
   fuel = MAX_FUEL;
   state = 'intro';
@@ -164,7 +169,7 @@ window.addEventListener('keydown', (e) => {
   if (e.repeat) return;
   if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') {
     e.preventDefault();
-    if (state === 'ready') { state = 'playing'; startThrust(); }
+    if (state === 'ready') { state = 'playing'; }
     else if (state === 'playing') startThrust();
     else if (state === 'win' || state === 'dead') {
       if (state === 'win') initLevel(level + 1);
@@ -188,7 +193,7 @@ canvas.addEventListener('touchstart', (e) => {
   e.preventDefault();
   touchStartX = e.touches[0].clientX;
   steering = 0;
-  if (state === 'ready') { state = 'playing'; startThrust(); }
+  if (state === 'ready') { state = 'playing'; }
   else if (state === 'playing') startThrust();
   else if (state === 'win' || state === 'dead') {
     if (state === 'win') initLevel(level + 1);
